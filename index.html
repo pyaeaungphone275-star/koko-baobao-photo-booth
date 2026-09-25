@@ -1,0 +1,116 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Koko & BaoBao <3 | Remote Photo Booth</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Nunito:wght@400;600;700;800&family=Pacifico&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <div class="hearts" aria-hidden="true">
+    <span>♥</span><span>♡</span><span>♥</span><span>♡</span><span>♥</span><span>♡</span>
+  </div>
+
+  <main class="app">
+    <section class="hero">
+      <div class="badge">our little corner ♡</div>
+      <h1>Koko &amp; BaoBao<span>&lt;3</span></h1>
+      <p>A private little photo booth for two.</p>
+    </section>
+
+    <!-- AUTH -->
+    <section id="authCard" class="card auth-card">
+      <h2>Welcome, cutie ♡</h2>
+      <p class="muted">Create an account or log in to meet in the booth.</p>
+
+      <input id="email" type="email" placeholder="Email" autocomplete="email">
+      <input id="password" type="password" placeholder="Password" autocomplete="current-password">
+
+      <div class="button-row">
+        <button id="signupBtn" class="secondary">Create Account</button>
+        <button id="loginBtn" class="primary">Log In</button>
+      </div>
+
+      <p id="authStatus" class="status"></p>
+    </section>
+
+    <!-- ROOM -->
+    <section id="roomCard" class="card room-card hidden">
+      <div class="room-top">
+        <div>
+          <h2>Our booth ♡</h2>
+          <p id="userLabel" class="muted"></p>
+        </div>
+        <button id="logoutBtn" class="text-btn">Log out</button>
+      </div>
+
+      <div class="room-actions">
+        <div class="room-input">
+          <label for="roomCode">Room code</label>
+          <input id="roomCode" maxlength="6" placeholder="ABC123" autocomplete="off">
+        </div>
+        <button id="createRoomBtn" class="primary">Create Booth</button>
+        <button id="joinRoomBtn" class="secondary">Join Booth</button>
+      </div>
+
+      <div id="roomStatus" class="status">Create a booth or enter a code.</div>
+    </section>
+
+    <!-- VIDEO -->
+    <section id="videoCard" class="card video-card hidden">
+      <div class="video-header">
+        <div>
+          <h2 id="roomTitle">Koko &amp; BaoBao ♡</h2>
+          <p id="connectionStatus" class="muted">Waiting for your person...</p>
+        </div>
+        <button id="leaveRoomBtn" class="text-btn">Leave room</button>
+      </div>
+
+      <div class="videos">
+        <div class="video-box">
+          <video id="remoteVideo" autoplay playsinline></video>
+          <span class="video-label">BaoBao ♡</span>
+          <div id="remotePlaceholder" class="video-placeholder">Waiting for BaoBao...</div>
+        </div>
+
+        <div class="video-box">
+          <video id="localVideo" autoplay playsinline muted></video>
+          <span class="video-label">Koko ♡</span>
+        </div>
+      </div>
+
+      <div class="booth-controls">
+        <button id="cameraBtn" class="secondary">Turn On Camera</button>
+        <button id="captureBtn" class="capture" disabled>♡ Take Photo</button>
+        <button id="downloadBtn" class="secondary" disabled>Save Photo</button>
+      </div>
+
+      <p id="photoStatus" class="status">Turn on your camera to start.</p>
+      <canvas id="canvas"></canvas>
+    </section>
+
+    <!-- MEMORIES -->
+    <section id="memoriesCard" class="card hidden">
+      <div class="section-title">
+        <div>
+          <h2>Little memories</h2>
+          <p>Your photos are saved in this browser.</p>
+        </div>
+        <button id="clearBtn" class="text-btn">Clear</button>
+      </div>
+
+      <div id="gallery" class="gallery">
+        <div class="empty">No photos yet ♡</div>
+      </div>
+    </section>
+
+    <footer>Koko ♡ BaoBao · made with love</footer>
+  </main>
+
+  <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+  <script src="script.js"></script>
+</body>
+</html>
