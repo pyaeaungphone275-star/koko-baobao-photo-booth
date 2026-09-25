@@ -24,6 +24,22 @@ const supabase = window.supabase.createClient(
 );
 
 
+/*
+  WebRTC ICE servers.
+
+  STUN alone works on most normal networks. If a connection
+  reaches "failed" on a restrictive network, add TURN entries
+  here (never hardcode private TURN credentials in this public
+  frontend file — load them from a config/environment value).
+
+  Example:
+  { urls: "turn:your-turn-server:3478", username: "...", credential: "..." }
+*/
+const ICE_SERVERS = [
+  { urls: "stun:stun.l.google.com:19302" }
+];
+
+
 // ---------- DOM ----------
 
 const authCard = document.getElementById("authCard");
@@ -50,6 +66,8 @@ const leaveRoomBtn = document.getElementById("leaveRoomBtn");
 const localVideo = document.getElementById("localVideo");
 const remoteVideo = document.getElementById("remoteVideo");
 const remotePlaceholder = document.getElementById("remotePlaceholder");
+const localRoleLabel = document.getElementById("localRoleLabel");
+const remoteRoleLabel = document.getElementById("remoteRoleLabel");
 
 const cameraBtn = document.getElementById("cameraBtn");
 const captureBtn = document.getElementById("captureBtn");
@@ -69,6 +87,11 @@ const clearBtn = document.getElementById("clearBtn");
 let currentUser = null;
 let currentRoom = null;
 let channel = null;
+
+// Explicit role, set by the action used to enter the room.
+// "Koko" = creator (always makes the initial WebRTC offer).
+// "BaoBao" = joiner (never makes the initial offer).
+let myRole = null;
 
 let localStream = null;
 let peerConnection = null;
@@ -109,6 +132,41 @@ function setConnectionStatus(message) {
 
 function setPhotoStatus(message) {
   photoStatus.textContent = message;
+}
+
+
+function remoteRoleName() {
+  if (myRole === "Koko") return "BaoBao";
+  if (myRole === "BaoBao") return "Koko";
+  return "your person";
+}
+
+
+// Reflects the local role (never the remote user's role) in the UI.
+function updateRoleUI() {
+
+  if (localRoleLabel) {
+    localRoleLabel.textContent = myRole
+      ? `${myRole} ♡ (You)`
+      : "You";
+  }
+
+  if (remoteRoleLabel) {
+    remoteRoleLabel.textContent = myRole
+      ? `${remoteRoleName()} ♡`
+      : "Your person";
+  }
+
+  if (remotePlaceholder && !remoteUserId) {
+    remotePlaceholder.textContent =
+      `Waiting for ${remoteRoleName()}...`;
+  }
+
+  if (userLabel && currentUser) {
+    userLabel.textContent = myRole
+      ? `Logged in as ${currentUser.email} · ${myRole} ♡`
+      : `Logged in as ${currentUser.email}`;
+  }
 }
 
 
@@ -187,14 +245,24 @@ async function logout() {
     console.error(error);
   }
 
+  await handleSignedOut();
+
+  setAuthStatus("Logged out ♡");
+}
+
+
+// Resets the UI to the logged-out state. Used for an explicit
+// logout and for an expired/invalid session (SIGNED_OUT event),
+// so a stale session never leaves buttons silently broken.
+async function handleSignedOut() {
+  await leaveRoom();
+
   currentUser = null;
 
   hide(roomCard);
   hide(videoCard);
   hide(memoriesCard);
   show(authCard);
-
-  setAuthStatus("Logged out ♡");
 }
 
 
@@ -233,7 +301,7 @@ supabase.auth.onAuthStateChange(
     }
 
     if (event === "SIGNED_OUT") {
-      currentUser = null;
+      await handleSignedOut();
     }
   }
 );
@@ -263,7 +331,11 @@ async function createRoom() {
 
   roomCodeInput.value = code;
 
-  await enterRoom(code, true);
+  myRole = "Koko";
+  console.log("[ROLE] Local role: Koko (creator)");
+  updateRoleUI();
+
+  await enterRoom(code);
 }
 
 
@@ -280,13 +352,40 @@ async function joinRoom() {
     return;
   }
 
-  await enterRoom(code, false);
+  myRole = "BaoBao";
+  console.log("[ROLE] Local role: BaoBao (joiner)");
+  updateRoleUI();
+
+  await enterRoom(code);
 }
 
 
-async function enterRoom(code, isCreator) {
+// Only Koko (the creator) is ever allowed to create the initial
+// WebRTC offer. BaoBao (the joiner) always waits for it. This is
+// checked here rather than by device/browser detection so the
+// role is deterministic regardless of presence-event timing.
+async function maybeCreateOffer() {
 
-  await leaveRoom();
+  if (myRole !== "Koko") {
+    console.log(
+      "[WEBRTC] Local role is",
+      myRole,
+      "- waiting for the offer, not creating one."
+    );
+    return;
+  }
+
+  if (!remoteUserId) {
+    return;
+  }
+
+  await makeOffer();
+}
+
+
+async function enterRoom(code) {
+
+  await leaveRoom({ keepRole: true });
 
   currentRoom = code;
 
@@ -334,7 +433,15 @@ async function enterRoom(code, isCreator) {
 
         if (others.length > 0) {
 
-          remoteUserId = others[0];
+          // Keep the existing remote peer if they're still
+          // present; only pick a new one if we don't have one.
+          // The room supports two people, so a stray extra
+          // presence entry should never bump the active peer.
+          if (!remoteUserId || !others.includes(remoteUserId)) {
+            remoteUserId = others[0];
+          }
+
+          console.log("[ROOM] Remote user detected:", remoteUserId);
 
           setRoomStatus(
             "Your person is here ♡"
@@ -346,9 +453,7 @@ async function enterRoom(code, isCreator) {
 
           await startPeerConnection();
 
-          if (isCreator) {
-            await makeOffer();
-          }
+          await maybeCreateOffer();
 
         } else {
 
@@ -359,8 +464,10 @@ async function enterRoom(code, isCreator) {
           );
 
           setConnectionStatus(
-            "Waiting for your person..."
+            `Waiting for ${remoteRoleName()}...`
           );
+
+          updateRoleUI();
         }
       }
     )
@@ -375,7 +482,17 @@ async function enterRoom(code, isCreator) {
           return;
         }
 
+        if (remoteUserId && remoteUserId !== key) {
+          console.log(
+            "[ROOM] Ignoring extra participant, room already full:",
+            key
+          );
+          return;
+        }
+
         remoteUserId = key;
+
+        console.log("[ROOM] Remote user joined:", key);
 
         setRoomStatus(
           "Your person joined ♡"
@@ -387,9 +504,9 @@ async function enterRoom(code, isCreator) {
 
         await startPeerConnection();
 
-        // The person who was already in the room
-        // makes the offer.
-        await makeOffer();
+        // Only Koko (the creator) creates the initial offer.
+        // BaoBao waits for it. See maybeCreateOffer().
+        await maybeCreateOffer();
       }
     )
     .on(
@@ -401,12 +518,14 @@ async function enterRoom(code, isCreator) {
 
         if (key === remoteUserId) {
 
+          console.log("[ROOM] Remote user left:", key);
+
           remoteUserId = null;
 
           remoteVideo.srcObject = null;
 
           remotePlaceholder.textContent =
-            "Waiting for BaoBao...";
+            `Waiting for ${remoteRoleName()}...`;
 
           remotePlaceholder.style.display =
             "grid";
@@ -436,6 +555,8 @@ async function enterRoom(code, isCreator) {
       async status => {
 
         if (status === "SUBSCRIBED") {
+
+          console.log(`[ROOM] Joined room ${code} as ${myRole}`);
 
           await channel.track({
             userId: currentUser.id,
@@ -473,28 +594,11 @@ async function startPeerConnection() {
     return;
   }
 
-
-  /*
-    Google STUN helps browsers discover
-    their public network address.
-
-    For the most reliable connection across
-    restrictive networks, add a TURN server
-    to the iceServers list later.
-  */
+  console.log("[WEBRTC] Creating peer connection");
 
   peerConnection =
     new RTCPeerConnection({
-
-      iceServers: [
-
-        {
-          urls:
-            "stun:stun.l.google.com:19302"
-        }
-
-      ]
-
+      iceServers: ICE_SERVERS
     });
 
 
@@ -521,6 +625,8 @@ async function startPeerConnection() {
         return;
       }
 
+      console.log("[ICE] Local ICE candidate generated");
+
       await sendSignal({
         type: "ice",
         candidate: event.candidate
@@ -531,6 +637,8 @@ async function startPeerConnection() {
 
   peerConnection.ontrack =
     event => {
+
+      console.log("[WEBRTC] Remote track received");
 
       const [stream] =
         event.streams;
@@ -594,6 +702,8 @@ async function startPeerConnection() {
 
       }
 
+      console.log("[WEBRTC] Connection state:", state);
+
     };
 }
 
@@ -611,6 +721,8 @@ async function makeOffer() {
   makingOffer = true;
 
   try {
+
+    console.log("[WEBRTC] Creating offer");
 
     const offer =
       await peerConnection.createOffer();
@@ -648,6 +760,8 @@ async function handleSignal(signal) {
 
   if (signal.type === "offer") {
 
+    console.log("[WEBRTC] Received offer");
+
     await peerConnection.setRemoteDescription(
       new RTCSessionDescription(signal.sdp)
     );
@@ -661,6 +775,8 @@ async function handleSignal(signal) {
       answer
     );
 
+
+    console.log("[WEBRTC] Creating answer");
 
     await sendSignal({
 
@@ -680,6 +796,8 @@ async function handleSignal(signal) {
 
   if (signal.type === "answer") {
 
+    console.log("[WEBRTC] Received answer");
+
     await peerConnection.setRemoteDescription(
       new RTCSessionDescription(signal.sdp)
     );
@@ -690,7 +808,22 @@ async function handleSignal(signal) {
   }
 
 
+  if (signal.type === "renegotiate") {
+
+    // Only the offer-creator (Koko) ever renegotiates, so a
+    // late camera-on from BaoBao still never creates an offer
+    // herself - she just asks Koko to redo the offer/answer.
+    if (myRole === "Koko") {
+      await makeOffer();
+    }
+
+    return;
+  }
+
+
   if (signal.type === "ice") {
+
+    console.log("[ICE] ICE candidate received");
 
     if (
       peerConnection.remoteDescription
@@ -712,6 +845,8 @@ async function handleSignal(signal) {
       }
 
     } else {
+
+      console.log("[ICE] Queuing candidate before remoteDescription is set");
 
       pendingCandidates.push(
         signal.candidate
@@ -791,6 +926,20 @@ function closePeerConnection() {
 // ---------- CAMERA ----------
 
 async function startCamera() {
+
+  if (
+    !navigator.mediaDevices ||
+    !navigator.mediaDevices.getUserMedia
+  ) {
+
+    setPhotoStatus(
+      window.isSecureContext === false
+        ? "Camera needs HTTPS or localhost. Open this page over a secure connection."
+        : "Camera access isn't supported in this browser."
+    );
+
+    return;
+  }
 
   try {
 
@@ -887,16 +1036,48 @@ async function startCamera() {
       }
 
 
-      await makeOffer();
+      // Only Koko creates offers. If BaoBao just added a new
+      // track after the connection was already established,
+      // ask Koko to renegotiate instead of offering herself.
+      if (myRole === "Koko") {
+        await makeOffer();
+      } else if (remoteUserId) {
+        await sendSignal({ type: "renegotiate" });
+      }
     }
 
   } catch (error) {
 
-    console.error(error);
+    console.error("[CAMERA] getUserMedia error:", error);
 
-    setPhotoStatus(
-      "Please allow camera and microphone access."
-    );
+    if (error.name === "NotAllowedError") {
+
+      setPhotoStatus(
+        "Camera/microphone permission denied. Allow access in your browser settings and try again."
+      );
+
+    } else if (
+      error.name === "NotFoundError" ||
+      error.name === "OverconstrainedError"
+    ) {
+
+      setPhotoStatus(
+        "No camera or microphone was found on this device."
+      );
+
+    } else if (error.name === "NotReadableError") {
+
+      setPhotoStatus(
+        "Your camera is already in use by another app."
+      );
+
+    } else {
+
+      setPhotoStatus(
+        "Could not access your camera. Please check permissions."
+      );
+
+    }
 
   }
 
@@ -1134,9 +1315,14 @@ function clearPhotos() {
 
 // ---------- LEAVE ROOM ----------
 
-async function leaveRoom() {
+// keepRole: true when called from enterRoom(), where myRole was
+// already set by createRoom()/joinRoom() for the room we're
+// about to join - it must not be wiped out here.
+async function leaveRoom({ keepRole = false } = {}) {
 
   closePeerConnection();
+
+  makingOffer = false;
 
 
   if (localStream) {
@@ -1181,6 +1367,12 @@ async function leaveRoom() {
   currentRoom = null;
   remoteUserId = null;
 
+  if (!keepRole) {
+    myRole = null;
+  }
+
+  updateRoleUI();
+
   hide(videoCard);
 
   setRoomStatus(
@@ -1188,7 +1380,7 @@ async function leaveRoom() {
   );
 
   setConnectionStatus(
-    "Waiting for your person..."
+    `Waiting for ${remoteRoleName()}...`
   );
 
   cameraBtn.textContent =
@@ -1265,7 +1457,8 @@ roomCodeInput.addEventListener(
 );
 
 
-// Stop camera when leaving page.
+// Stop camera and drop presence when leaving the page, so a
+// refresh/close doesn't leave a stale participant in the room.
 window.addEventListener(
   "pagehide",
   () => {
@@ -1278,6 +1471,12 @@ window.addEventListener(
           track => track.stop()
         );
 
+    }
+
+    if (channel) {
+      try {
+        channel.untrack();
+      } catch (_) {}
     }
 
   }
