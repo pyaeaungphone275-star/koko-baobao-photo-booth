@@ -27,17 +27,23 @@ const supabase = window.supabase.createClient(
 /*
   WebRTC ICE servers.
 
-  STUN alone works on most normal networks. If a connection
-  reaches "failed" on a restrictive network, add TURN entries
-  here (never hardcode private TURN credentials in this public
-  frontend file — load them from a config/environment value).
+  STUN is always used. TURN (relay) credentials are NOT stored
+  in this public file: they are short-lived credentials fetched
+  from the Supabase Edge Function below, which holds the TURN
+  provider's secret server-side
+  (see supabase/functions/turn-credentials/index.ts).
 
-  Example:
-  { urls: "turn:your-turn-server:3478", username: "...", credential: "..." }
+  If the function is missing or fails, WebRTC falls back to
+  STUN only. Set to "" to disable TURN entirely.
 */
-const ICE_SERVERS = [
+const STUN_SERVERS = [
   { urls: "stun:stun.l.google.com:19302" }
 ];
+
+const TURN_CREDENTIALS_FUNCTION = "turn-credentials";
+
+// Re-fetch TURN credentials after this long (they expire server-side).
+const TURN_CACHE_MS = 60 * 60 * 1000;
 
 
 // ---------- DOM ----------
@@ -95,6 +101,10 @@ let myRole = null;
 
 let localStream = null;
 let peerConnection = null;
+let peerConnectionStarting = null;
+
+let turnServers = null;
+let turnServersFetchedAt = 0;
 
 let remoteUserId = null;
 let makingOffer = false;
@@ -588,17 +598,89 @@ async function enterRoom(code) {
 
 // ---------- WEBRTC ----------
 
+async function getIceServers() {
+
+  if (!TURN_CREDENTIALS_FUNCTION) {
+    return STUN_SERVERS;
+  }
+
+  if (
+    turnServers &&
+    Date.now() - turnServersFetchedAt < TURN_CACHE_MS
+  ) {
+    return [...STUN_SERVERS, ...turnServers];
+  }
+
+  try {
+
+    const { data, error } =
+      await supabase.functions.invoke(
+        TURN_CREDENTIALS_FUNCTION
+      );
+
+    if (error) {
+      throw error;
+    }
+
+    if (!data || !Array.isArray(data.iceServers)) {
+      throw new Error("No iceServers in response");
+    }
+
+    turnServers = data.iceServers;
+    turnServersFetchedAt = Date.now();
+
+    console.log(
+      "[WebRTC] TURN configuration fetched:",
+      turnServers.length,
+      "ICE server entries"
+    );
+
+  } catch (error) {
+
+    console.warn(
+      "[WebRTC] Could not load TURN credentials, using STUN only:",
+      error
+    );
+
+    return STUN_SERVERS;
+  }
+
+  return [...STUN_SERVERS, ...turnServers];
+}
+
+
 async function startPeerConnection() {
 
   if (peerConnection) {
     return;
   }
 
-  console.log("[WEBRTC] Creating peer connection");
+  // Several callers (presence sync/join, incoming signals) can
+  // arrive while TURN credentials are loading; share one setup.
+  if (!peerConnectionStarting) {
+    peerConnectionStarting =
+      createPeerConnection().finally(() => {
+        peerConnectionStarting = null;
+      });
+  }
+
+  await peerConnectionStarting;
+}
+
+
+async function createPeerConnection() {
+
+  const iceServers =
+    await getIceServers();
+
+  console.log(
+    "[WebRTC] ICE servers configured:",
+    iceServers.map(server => server.urls)
+  );
 
   peerConnection =
     new RTCPeerConnection({
-      iceServers: ICE_SERVERS
+      iceServers
     });
 
 
@@ -625,7 +707,20 @@ async function startPeerConnection() {
         return;
       }
 
-      console.log("[ICE] Local ICE candidate generated");
+      const { type, protocol, address, port } =
+        event.candidate;
+
+      console.log(
+        "[WebRTC] ICE candidate:",
+        type,
+        protocol,
+        address,
+        port
+      );
+
+      if (type === "relay") {
+        console.log("[WebRTC] TURN/relay candidate detected");
+      }
 
       await sendSignal({
         type: "ice",
@@ -638,7 +733,10 @@ async function startPeerConnection() {
   peerConnection.ontrack =
     event => {
 
-      console.log("[WEBRTC] Remote track received");
+      console.log(
+        "[WebRTC] Remote track received:",
+        event.track.kind
+      );
 
       const [stream] =
         event.streams;
@@ -702,8 +800,38 @@ async function startPeerConnection() {
 
       }
 
-      console.log("[WEBRTC] Connection state:", state);
+      console.log("[WebRTC] Connection state:", state);
 
+    };
+
+
+  peerConnection.onicegatheringstatechange =
+    () => {
+      console.log(
+        "[WebRTC] ICE gathering state:",
+        peerConnection.iceGatheringState
+      );
+    };
+
+
+  peerConnection.oniceconnectionstatechange =
+    () => {
+      console.log(
+        "[WebRTC] ICE connection state:",
+        peerConnection.iceConnectionState
+      );
+    };
+
+
+  // Reports TURN auth/reachability failures (e.g. bad credentials).
+  peerConnection.onicecandidateerror =
+    event => {
+      console.warn(
+        "[WebRTC] ICE candidate error:",
+        event.url,
+        event.errorCode,
+        event.errorText
+      );
     };
 }
 

@@ -38,11 +38,29 @@ Camera and microphone permissions work on localhost and HTTPS.
 
 ## Cross-device video
 
-WebRTC uses a public Google STUN server in this starter version.
+WebRTC always uses a public Google STUN server. Some networks (mobile
+carriers, strict NATs, corporate/school Wi-Fi) also need a TURN relay.
 
-Most normal networks should connect directly. Some restrictive networks
-will require a TURN server. If the connection reaches "failed", add a TURN
-server to the iceServers array in script.js.
+TURN credentials are never stored in script.js (it is public on GitHub
+Pages). Instead the Supabase Edge Function in
+`supabase/functions/turn-credentials` fetches the Metered TURN ICE-server
+configuration for signed-in users:
+
+1. In the Metered dashboard, open your TURN credential and copy its
+   API key (not the account Secret Key), and note your app name
+   (the `<name>` in `<name>.metered.live`).
+2. With the Supabase CLI:
+
+   ```
+   supabase link --project-ref keymklolnvpfgwsszmgr
+   supabase secrets set METERED_APP_NAME=... METERED_API_KEY=...
+   supabase functions deploy turn-credentials --no-verify-jwt
+   ```
+
+   (`--no-verify-jwt` because the function checks the user's session itself.)
+
+If the function is not deployed or fails, the app falls back to STUN only
+and logs a warning in the browser console.
 
 ## Deployment
 
