@@ -199,6 +199,7 @@ button:disabled {
 }
 
 .videos {
+  position: relative;
   display: grid;
   grid-template-columns: 1fr 1fr;
   gap: 13px;
@@ -251,6 +252,53 @@ button:disabled {
 
 #canvas { display: none; }
 
+.countdown-overlay {
+  position: absolute;
+  inset: 0;
+  z-index: 3;
+  display: grid;
+  place-items: center;
+  border-radius: 22px;
+  background: #ff6fae26;
+  pointer-events: none;
+}
+
+.countdown-overlay span {
+  font-family: "Pacifico", cursive;
+  font-size: clamp(80px, 18vw, 160px);
+  line-height: 1;
+  color: white;
+  text-shadow: 0 6px 0 var(--pink-dark), 0 12px 30px #bd477b66;
+}
+
+.countdown-overlay span.tick {
+  animation: countdown-pop .9s ease-out;
+}
+
+@keyframes countdown-pop {
+  from { transform: scale(1.6); opacity: 0; }
+  30% { transform: scale(1); opacity: 1; }
+  to { transform: scale(.9); opacity: .85; }
+}
+
+.flash {
+  position: fixed;
+  inset: 0;
+  z-index: 20;
+  background: #fff5fa;
+  opacity: 0;
+  pointer-events: none;
+}
+
+.flash.active {
+  animation: flash .7s ease-out;
+}
+
+@keyframes flash {
+  from { opacity: 1; }
+  to { opacity: 0; }
+}
+
 .gallery {
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(145px, 1fr));
@@ -270,6 +318,15 @@ button:disabled {
   width: 100%;
   height: 100%;
   object-fit: cover;
+}
+
+.photo.reveal {
+  animation: reveal .8s cubic-bezier(.2, 1.4, .4, 1);
+}
+
+@keyframes reveal {
+  from { transform: scale(.6) rotate(-6deg); opacity: 0; }
+  to { transform: scale(1) rotate(0); opacity: 1; }
 }
 
 .empty {

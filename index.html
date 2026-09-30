@@ -80,6 +80,10 @@
           <video id="localVideo" autoplay playsinline muted></video>
           <span id="localRoleLabel" class="video-label">You ♡</span>
         </div>
+
+        <div id="countdownOverlay" class="countdown-overlay hidden" aria-live="assertive">
+          <span id="countdownNumber"></span>
+        </div>
       </div>
 
       <div class="booth-controls">
@@ -97,15 +101,16 @@
       <div class="section-title">
         <div>
           <h2>Little memories</h2>
-          <p>Your photos are saved in this browser.</p>
+          <p>Shared with your person in this booth.</p>
         </div>
-        <button id="clearBtn" class="text-btn">Clear</button>
       </div>
 
       <div id="gallery" class="gallery">
-        <div class="empty">No photos yet ♡</div>
+        <div class="empty">Join a booth to see your memories ♡</div>
       </div>
     </section>
+
+    <div id="flash" class="flash" aria-hidden="true"></div>
 
     <footer>Koko ♡ BaoBao · made with love</footer>
   </main>
