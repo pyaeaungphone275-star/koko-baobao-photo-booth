@@ -1,6 +1,6 @@
 /*
 ==========================================================
-KOKO & BAOBAO REMOTE PHOTO BOOTH
+OUR LITTLE WORLD — REMOTE PHOTO BOOTH
 
 1. Put your Supabase URL and anon/publishable key below.
 2. Supabase Auth handles accounts.
@@ -1240,7 +1240,7 @@ const MEMORIES_LIMIT = 50;
 const SIGNED_URL_SECONDS = 60 * 60;
 
 // Final photo layout: two portrait panels side by side,
-// with the Koko ♡ BaoBao <3 banner underneath.
+// with the "our little world" banner underneath.
 const PHOTO_PANEL_WIDTH = 660;
 const PHOTO_PANEL_HEIGHT = 880;
 const PHOTO_PADDING = 40;
@@ -1664,7 +1664,7 @@ function drawCompositePhoto() {
     "bold 60px Nunito";
 
   ctx.fillText(
-    "Koko ♡ BaoBao <3",
+    "our little world",
     width / 2,
     PHOTO_PADDING + PHOTO_PANEL_HEIGHT + 78
   );
@@ -1993,7 +1993,7 @@ function createPhotoElement(memory, reveal = false) {
     document.createElement("img");
 
   img.src = memory.url;
-  img.alt = "Koko and BaoBao memory";
+  img.alt = "our little world memory";
 
   div.appendChild(img);
 
