@@ -89,6 +89,13 @@ const flash = document.getElementById("flash");
 
 const gallery = document.getElementById("gallery");
 
+const shotIndicator = document.getElementById("shotIndicator");
+const developingText = document.getElementById("developingText");
+const frameSelector = document.getElementById("frameSelector");
+const beautySelector = document.getElementById("beautySelector");
+const stripReveal = document.getElementById("stripReveal");
+const stripImage = document.getElementById("stripImage");
+
 
 // ---------- STATE ----------
 
@@ -114,13 +121,22 @@ let makingOffer = false;
 let pendingCandidates = [];
 
 let latestPhoto = null;
+let latestPhotoDate = null;
+
+// This device's frame and beauty choice. The session initiator's
+// choice is the one used for the strip.
+let photoSettings = {
+  frame: "hearts",
+  beauty: "natural"
+};
 
 // Shared memories for the current room, newest first.
 // Each entry is a public.memories row plus a displayable `url`.
 let memories = [];
 
-// The running synchronized countdown, if any:
-// { captureId, initiatorId, timers }
+// The running synchronized 3-shot session, if any:
+// { captureId, initiatorId, roomCode, settings, shots,
+//   phase: "countdown" | "developing", timers }
 let activeCapture = null;
 
 
@@ -1235,18 +1251,217 @@ async function startCamera() {
 
 const COUNTDOWN_SECONDS = 5;
 
+// One Take Photo press starts one session of SHOT_COUNT shots.
+// Each shot is a COUNTDOWN_SECONDS countdown, a flash, then a
+// short pause before the next shot's countdown begins.
+const SHOT_COUNT = 3;
+const SHOT_PAUSE_MS = 1800;
+const SHOT_INTERVAL_MS = COUNTDOWN_SECONDS * 1000 + SHOT_PAUSE_MS;
+
+// How long the other person waits for the finished strip before
+// Take Photo is re-enabled anyway.
+const DEVELOPING_TIMEOUT_MS = 45000;
+
 const MEMORIES_BUCKET = "memories";
 const MEMORIES_LIMIT = 50;
 const SIGNED_URL_SECONDS = 60 * 60;
 
-// Final photo layout: two portrait panels side by side,
-// with the "our little world" banner underneath.
-const PHOTO_PANEL_WIDTH = 660;
-const PHOTO_PANEL_HEIGHT = 880;
-const PHOTO_PADDING = 40;
-const PHOTO_GAP = 20;
-const PHOTO_FOOTER = 140;
+// Matches the bucket's file_size_limit.
+const MAX_UPLOAD_BYTES = 5 * 1024 * 1024;
 
+// Final strip layout: SHOT_COUNT shots stacked vertically, each
+// holding both people side by side, with the "our little world"
+// footer underneath.
+const STRIP_WIDTH = 1200;
+const STRIP_PADDING = 60;
+const SHOT_WIDTH = STRIP_WIDTH - STRIP_PADDING * 2;
+const SHOT_HEIGHT = 810;
+const SHOT_GAP = 44;
+const SHOT_DIVIDER = 8;
+const PERSON_WIDTH = (SHOT_WIDTH - SHOT_DIVIDER) / 2;
+const STRIP_FOOTER = 250;
+
+const STRIP_HEIGHT =
+  STRIP_PADDING +
+  SHOT_COUNT * SHOT_HEIGHT +
+  (SHOT_COUNT - 1) * SHOT_GAP +
+  STRIP_FOOTER;
+
+const FRAME_STYLES = ["hearts", "roses", "letter"];
+
+// radius/epsilon drive the edge-preserving smoothing (bigger =
+// smoother, but strong edges like eyes and hair are always kept).
+// smoothing is the most that is ever blended in, so some natural
+// skin texture always remains.
+const BEAUTY_LEVELS = {
+  natural: { radius: 4, epsilon: 140, smoothing: 0.55, evenTone: 0.35, brighten: 0.045 },
+  soft: { radius: 6, epsilon: 320, smoothing: 0.75, evenTone: 0.5, brighten: 0.07 },
+  off: null
+};
+
+const PHOTO_SETTINGS_KEY = "our-little-world-photo-settings";
+
+
+// ---------- PHOTO OPTIONS ----------
+
+function loadPhotoSettings() {
+
+  try {
+
+    const saved =
+      JSON.parse(localStorage.getItem(PHOTO_SETTINGS_KEY));
+
+    if (saved && FRAME_STYLES.includes(saved.frame)) {
+      photoSettings.frame = saved.frame;
+    }
+
+    if (saved && Object.prototype.hasOwnProperty.call(BEAUTY_LEVELS, saved.beauty)) {
+      photoSettings.beauty = saved.beauty;
+    }
+
+  } catch (_) {}
+}
+
+
+function savePhotoSettings() {
+
+  try {
+    localStorage.setItem(
+      PHOTO_SETTINGS_KEY,
+      JSON.stringify(photoSettings)
+    );
+  } catch (_) {}
+}
+
+
+function updatePhotoOptionsUI() {
+
+  frameSelector
+    .querySelectorAll("[data-frame]")
+    .forEach(chip => {
+      chip.setAttribute(
+        "aria-checked",
+        chip.dataset.frame === photoSettings.frame
+      );
+    });
+
+  beautySelector
+    .querySelectorAll("[data-beauty]")
+    .forEach(button => {
+      button.setAttribute(
+        "aria-checked",
+        button.dataset.beauty === photoSettings.beauty
+      );
+    });
+}
+
+
+function setPhotoOptionsDisabled(disabled) {
+
+  frameSelector
+    .querySelectorAll("button")
+    .forEach(button => { button.disabled = disabled; });
+
+  beautySelector
+    .querySelectorAll("button")
+    .forEach(button => { button.disabled = disabled; });
+}
+
+
+function selectFrame(event) {
+
+  const chip =
+    event.target.closest("[data-frame]");
+
+  if (!chip || chip.disabled) {
+    return;
+  }
+
+  photoSettings.frame = chip.dataset.frame;
+
+  savePhotoSettings();
+  updatePhotoOptionsUI();
+}
+
+
+function selectBeauty(event) {
+
+  const button =
+    event.target.closest("[data-beauty]");
+
+  if (!button || button.disabled) {
+    return;
+  }
+
+  photoSettings.beauty = button.dataset.beauty;
+
+  savePhotoSettings();
+  updatePhotoOptionsUI();
+}
+
+
+// Each chip previews its frame using the same drawing code as
+// the final strip, on a stand-in "photo".
+function renderFramePreviews() {
+
+  frameSelector
+    .querySelectorAll("[data-frame]")
+    .forEach(chip => {
+
+      const preview =
+        chip.querySelector("canvas");
+
+      const ctx =
+        preview.getContext("2d");
+
+      const style = chip.dataset.frame;
+
+      const w = preview.width;
+      const h = preview.height;
+
+      drawStripBackground(ctx, style, w, h, 0.3);
+
+      const x = 16;
+      const y = 14;
+      const shotW = w - 32;
+      const shotH = h - 28;
+
+      ctx.save();
+
+      roundRectPath(ctx, x, y, shotW, shotH, 6);
+      ctx.clip();
+
+      const photo =
+        ctx.createLinearGradient(0, y, 0, y + shotH);
+
+      photo.addColorStop(0, "#f8dbe6");
+      photo.addColorStop(1, "#ecbcd0");
+
+      ctx.fillStyle = photo;
+      ctx.fillRect(x, y, shotW, shotH);
+
+      // Two little people.
+      ctx.fillStyle = "#fff5f9";
+
+      for (const cx of [x + shotW * 0.3, x + shotW * 0.7]) {
+
+        ctx.beginPath();
+        ctx.arc(cx, y + shotH * 0.45, shotH * 0.15, 0, Math.PI * 2);
+        ctx.fill();
+
+        ctx.beginPath();
+        ctx.ellipse(cx, y + shotH * 1.02, shotH * 0.3, shotH * 0.36, 0, 0, Math.PI * 2);
+        ctx.fill();
+      }
+
+      ctx.restore();
+
+      drawFrameDecor(ctx, style, x, y, shotW, shotH, 0.28);
+    });
+}
+
+
+// ---------- PHOTO SESSION ----------
 
 // Photo events share the room channel with WebRTC signaling
 // but use their own broadcast event, so handleSignal() never
@@ -1297,8 +1512,10 @@ async function handlePhotoEvent(payload) {
 
   if (payload.type === "photo-failed") {
 
+    finishDeveloping();
+
     setPhotoStatus(
-      "That photo couldn't be saved this time ♡"
+      "That photo strip couldn't be saved this time ♡"
     );
 
   }
@@ -1306,10 +1523,11 @@ async function handlePhotoEvent(payload) {
 
 
 // Take Photo: whoever presses it becomes the initiator and is the
-// only one who captures, uploads and records the memory.
+// only one who captures, builds the strip, uploads it and records
+// the memory. The other device just follows the countdown.
 async function requestPhoto() {
 
-  if (!localStream || activeCapture) {
+  if (!localStream || activeCapture || !currentRoom) {
     return;
   }
 
@@ -1338,6 +1556,8 @@ async function requestPhoto() {
 }
 
 
+// Runs the whole 3-shot session on this device. Both devices run
+// the same schedule from the same "countdown" event.
 function startCountdown({ captureId, initiatorId }) {
 
   if (activeCapture) {
@@ -1346,61 +1566,116 @@ function startCountdown({ captureId, initiatorId }) {
       return;
     }
 
-    // Both pressed at nearly the same time. Both devices keep the
-    // capture with the smaller id, so exactly one initiator remains.
-    if (captureId < activeCapture.captureId) {
+    if (
+      activeCapture.phase === "developing" &&
+      activeCapture.initiatorId !== currentUser.id
+    ) {
 
-      console.log(
-        "[PHOTO] Simultaneous capture, initiator is now",
-        initiatorId === currentUser.id ? "me" : "remote"
-      );
+      // We were still waiting on the last strip, but the other
+      // person has already started a new session.
+      endCountdown();
 
-      activeCapture.captureId = captureId;
-      activeCapture.initiatorId = initiatorId;
+    } else {
+
+      // Both pressed at nearly the same time. Both devices keep the
+      // session with the smaller id, so exactly one initiator remains.
+      if (
+        activeCapture.phase === "countdown" &&
+        activeCapture.shots.length === 0 &&
+        captureId < activeCapture.captureId
+      ) {
+
+        console.log(
+          "[PHOTO] Simultaneous capture, initiator is now",
+          initiatorId === currentUser.id ? "me" : "remote"
+        );
+
+        activeCapture.captureId = captureId;
+        activeCapture.initiatorId = initiatorId;
+      }
+
+      return;
     }
-
-    return;
   }
 
-  activeCapture = {
+  const capture = {
     captureId,
     initiatorId,
+    roomCode: currentRoom,
+    settings: { ...photoSettings },
+    shots: [],
+    phase: "countdown",
     timers: []
   };
 
+  activeCapture = capture;
+
   captureBtn.disabled = true;
+  setPhotoOptionsDisabled(true);
+
+  hide(stripReveal);
+  hide(developingText);
 
   console.log(
-    "[PHOTO] Countdown started",
+    "[PHOTO] Session started",
     captureId,
     initiatorId === currentUser.id ? "(initiator)" : "(remote initiator)"
   );
 
   setPhotoStatus(
     initiatorId === currentUser.id
-      ? "Get cozy... smile! ♡"
-      : `${remoteRoleName()} is taking a photo... smile! ♡`
+      ? "Get cozy... 3 photos coming up! ♡"
+      : `${remoteRoleName()} started the photo booth... smile! ♡`
   );
 
   show(countdownOverlay);
 
-  for (let i = 0; i < COUNTDOWN_SECONDS; i++) {
+  const schedule = (callback, delay) => {
+    capture.timers.push(setTimeout(callback, delay));
+  };
 
-    activeCapture.timers.push(
-      setTimeout(
+  for (let shot = 1; shot <= SHOT_COUNT; shot++) {
+
+    const shotStart =
+      (shot - 1) * SHOT_INTERVAL_MS;
+
+    schedule(() => beginShot(shot), shotStart);
+
+    for (let i = 0; i < COUNTDOWN_SECONDS; i++) {
+
+      schedule(
         () => showCountdownNumber(COUNTDOWN_SECONDS - i),
-        i * 1000
-      )
+        shotStart + i * 1000
+      );
+
+    }
+
+    schedule(
+      () => takeShot(shot),
+      shotStart + COUNTDOWN_SECONDS * 1000
     );
 
+    if (shot < SHOT_COUNT) {
+      schedule(
+        () => { countdownNumber.textContent = ""; },
+        shotStart + COUNTDOWN_SECONDS * 1000 + 900
+      );
+    }
   }
 
-  activeCapture.timers.push(
-    setTimeout(
-      finishCountdown,
-      COUNTDOWN_SECONDS * 1000
-    )
+  schedule(
+    finishCountdown,
+    (SHOT_COUNT - 1) * SHOT_INTERVAL_MS + COUNTDOWN_SECONDS * 1000 + 900
   );
+}
+
+
+function beginShot(shot) {
+
+  console.log(`[PHOTO] Shot ${shot} of ${SHOT_COUNT}`);
+
+  shotIndicator.textContent =
+    `SHOT ${shot} OF ${SHOT_COUNT}`;
 }
 
 
@@ -1417,6 +1692,31 @@ function showCountdownNumber(number) {
 }
 
 
+function takeShot(shot) {
+
+  const capture = activeCapture;
+
+  if (!capture) {
+    return;
+  }
+
+  // Grab the frames before the flash and UI changes.
+  if (capture.initiatorId === currentUser.id) {
+
+    console.log("[PHOTO] Capturing shot", shot);
+
+    capture.shots.push(
+      captureShotFrame()
+    );
+
+  }
+
+  showCountdownNumber("📸");
+
+  playFlash();
+}
+
+
 function endCountdown() {
 
   if (activeCapture) {
@@ -1426,10 +1726,14 @@ function endCountdown() {
   activeCapture = null;
 
   countdownNumber.textContent = "";
+  shotIndicator.textContent = "";
 
+  hide(developingText);
   hide(countdownOverlay);
 
   captureBtn.disabled = !localStream;
+
+  setPhotoOptionsDisabled(false);
 }
 
 
@@ -1441,6 +1745,14 @@ function playFlash() {
 }
 
 
+function waitForPaint() {
+
+  return new Promise(resolve => setTimeout(resolve, 50));
+}
+
+
+// After the last shot: show "developing", then the initiator builds
+// and saves the strip while the other device waits for it.
 async function finishCountdown() {
 
   const capture = activeCapture;
@@ -1449,31 +1761,102 @@ async function finishCountdown() {
     return;
   }
 
-  const isInitiator =
-    capture.initiatorId === currentUser.id;
+  capture.phase = "developing";
 
-  // Grab the frames before the flash and UI changes.
-  if (isInitiator) {
-    drawCompositePhoto();
-  }
+  capture.timers.forEach(clearTimeout);
+  capture.timers = [];
 
-  playFlash();
+  countdownNumber.textContent = "";
+  shotIndicator.textContent = "";
 
-  endCountdown();
+  show(developingText);
 
-  if (isInitiator) {
+  setPhotoStatus(
+    "developing our little memory ♡"
+  );
 
-    await saveCapturedPhoto(capture.captureId);
+  if (capture.initiatorId !== currentUser.id) {
 
-  } else {
+    capture.timers.push(
+      setTimeout(() => {
 
-    setPhotoStatus(
-      "Developing your photo ♡"
+        if (activeCapture === capture) {
+
+          endCountdown();
+
+          setPhotoStatus(
+            "The strip is taking a while... it'll show up in Memories ♡"
+          );
+
+        }
+
+      }, DEVELOPING_TIMEOUT_MS)
     );
 
+    return;
+  }
+
+  // Let "developing" paint before the heavy pixel work.
+  await waitForPaint();
+
+  try {
+
+    await createPhotoStrip(capture);
+
+  } catch (error) {
+
+    console.error("[PHOTO] Could not create the photo strip:", error);
+
+    if (activeCapture === capture) {
+      endCountdown();
+    }
+
+    setPhotoStatus(
+      "Could not create the photo strip. Please try again."
+    );
+
+    await sendPhotoEvent({ type: "photo-failed" });
+
+    return;
+  }
+
+  await saveCapturedPhoto(capture);
+
+  if (activeCapture === capture) {
+    endCountdown();
   }
 }
 
+
+// The other device's session ends once the strip arrives (or the
+// initiator reports a failure).
+function finishDeveloping() {
+
+  if (
+    activeCapture &&
+    activeCapture.phase === "developing" &&
+    activeCapture.initiatorId !== currentUser.id
+  ) {
+    endCountdown();
+  }
+}
+
+
+function showStrip(url) {
+
+  hide(developingText);
+  hide(countdownOverlay);
+
+  stripImage.src = url;
+
+  // Restart the reveal animation.
+  hide(stripReveal);
+  void stripReveal.offsetWidth;
+  show(stripReveal);
+}
+
+
+// ---------- CAPTURE ----------
 
 function isVideoReady(video) {
 
@@ -1486,40 +1869,28 @@ function isVideoReady(video) {
 }
 
 
-function clipPhotoPanel(ctx, x, y) {
-
-  ctx.beginPath();
-
-  if (ctx.roundRect) {
-    ctx.roundRect(x, y, PHOTO_PANEL_WIDTH, PHOTO_PANEL_HEIGHT, 28);
-  } else {
-    ctx.rect(x, y, PHOTO_PANEL_WIDTH, PHOTO_PANEL_HEIGHT);
-  }
-
-  ctx.clip();
-}
-
-
-// Draws a video frame into a panel, cropped to fill it ("cover")
+// Draws a video frame into an area, cropped to fill it ("cover")
 // and mirrored to match how both videos appear in the booth.
-function drawVideoPanel(ctx, video, x, y) {
+function drawVideoPanel(ctx, video, x, y, width, height) {
 
   const scale = Math.max(
-    PHOTO_PANEL_WIDTH / video.videoWidth,
-    PHOTO_PANEL_HEIGHT / video.videoHeight
+    width / video.videoWidth,
+    height / video.videoHeight
   );
 
-  const sourceWidth = PHOTO_PANEL_WIDTH / scale;
-  const sourceHeight = PHOTO_PANEL_HEIGHT / scale;
+  const sourceWidth = width / scale;
+  const sourceHeight = height / scale;
 
   const sourceX = (video.videoWidth - sourceWidth) / 2;
   const sourceY = (video.videoHeight - sourceHeight) / 2;
 
   ctx.save();
 
-  clipPhotoPanel(ctx, x, y);
+  ctx.beginPath();
+  ctx.rect(x, y, width, height);
+  ctx.clip();
 
-  ctx.translate(x + PHOTO_PANEL_WIDTH, y);
+  ctx.translate(x + width, y);
   ctx.scale(-1, 1);
 
   ctx.drawImage(
@@ -1530,24 +1901,18 @@ function drawVideoPanel(ctx, video, x, y) {
     sourceHeight,
     0,
     0,
-    PHOTO_PANEL_WIDTH,
-    PHOTO_PANEL_HEIGHT
+    width,
+    height
   );
 
   ctx.restore();
 }
 
 
-function drawPlaceholderPanel(ctx, x, y, name) {
-
-  ctx.save();
-
-  clipPhotoPanel(ctx, x, y);
+function drawPlaceholderPanel(ctx, x, y, width, height, name) {
 
   ctx.fillStyle = "#311d28";
-  ctx.fillRect(x, y, PHOTO_PANEL_WIDTH, PHOTO_PANEL_HEIGHT);
-
-  ctx.restore();
+  ctx.fillRect(x, y, width, height);
 
   ctx.fillStyle = "#ffd9e9";
   ctx.textAlign = "center";
@@ -1555,50 +1920,29 @@ function drawPlaceholderPanel(ctx, x, y, name) {
 
   ctx.fillText(
     `${name} ♡`,
-    x + PHOTO_PANEL_WIDTH / 2,
-    y + PHOTO_PANEL_HEIGHT / 2
+    x + width / 2,
+    y + height / 2
   );
 }
 
 
-// Composites both people into the existing canvas.
-function drawCompositePhoto() {
+// Grabs one shot (both people, Koko on the left and BaoBao on the
+// right) into its own canvas. Only cheap drawing happens here so
+// the countdown and WebRTC stay smooth; beauty and frames are
+// applied after the last shot.
+function captureShotFrame() {
 
-  console.log("[PHOTO] Capturing frame");
+  const shot =
+    document.createElement("canvas");
 
-  const width =
-    PHOTO_PADDING * 2 + PHOTO_PANEL_WIDTH * 2 + PHOTO_GAP;
-
-  const height =
-    PHOTO_PADDING + PHOTO_PANEL_HEIGHT + PHOTO_FOOTER;
-
-  canvas.width = width;
-  canvas.height = height;
+  shot.width = SHOT_WIDTH;
+  shot.height = SHOT_HEIGHT;
 
   const ctx =
-    canvas.getContext("2d");
+    shot.getContext("2d", { willReadFrequently: true });
 
-
-  /*
-    Soft pink card.
-  */
-
-  const background =
-    ctx.createLinearGradient(0, 0, width, height);
-
-  background.addColorStop(0, "#fff7fb");
-  background.addColorStop(1, "#ffd6e8");
-
-  ctx.fillStyle = background;
-  ctx.fillRect(0, 0, width, height);
-
-
-  /*
-    Koko always on the left, BaoBao on the right.
-  */
-
-  const leftX = PHOTO_PADDING;
-  const rightX = PHOTO_PADDING + PHOTO_PANEL_WIDTH + PHOTO_GAP;
+  const leftX = 0;
+  const rightX = PERSON_WIDTH + SHOT_DIVIDER;
 
   const localOnLeft = myRole !== "BaoBao";
 
@@ -1619,7 +1963,7 @@ function drawCompositePhoto() {
 
     if (isVideoReady(panel.video)) {
 
-      drawVideoPanel(ctx, panel.video, panel.x, PHOTO_PADDING);
+      drawVideoPanel(ctx, panel.video, panel.x, 0, PERSON_WIDTH, SHOT_HEIGHT);
 
     } else {
 
@@ -1628,52 +1972,588 @@ function drawCompositePhoto() {
         panel.name
       );
 
-      drawPlaceholderPanel(ctx, panel.x, PHOTO_PADDING, panel.name);
+      drawPlaceholderPanel(ctx, panel.x, 0, PERSON_WIDTH, SHOT_HEIGHT, panel.name);
 
     }
 
   }
 
+  return shot;
+}
 
-  /*
-    Pink tint.
-  */
 
-  ctx.fillStyle =
-    "rgba(255, 111, 174, 0.12)";
+// ---------- BEAUTY ----------
 
-  ctx.fillRect(
-    0,
-    0,
-    width,
-    height
+// 0..1 within [low, high], fading to 0 over `fade` outside it.
+function softRange(value, low, high, fade) {
+
+  if (value < low) {
+    return Math.max(0, 1 - (low - value) / fade);
+  }
+
+  if (value > high) {
+    return Math.max(0, 1 - (value - high) / fade);
+  }
+
+  return 1;
+}
+
+
+// How skin-like a colour is (0..1), using the widely used YCbCr
+// skin range, which works across skin tones and ignores most hair,
+// eyes, clothes and backgrounds.
+function skinScore(r, g, b) {
+
+  const luma = 0.299 * r + 0.587 * g + 0.114 * b;
+  const cb = 128 - 0.168736 * r - 0.331264 * g + 0.5 * b;
+  const cr = 128 + 0.5 * r - 0.418688 * g - 0.081312 * b;
+
+  return (
+    softRange(cb, 77, 127, 8) *
+    softRange(cr, 135, 172, 6) *
+    softRange(luma, 45, 250, 20)
   );
+}
 
 
-  /*
-    Couple name.
-  */
+// Mean over a (2r+1)x(2r+1) box around every pixel, via a summed
+// area table so it costs the same for any radius.
+function boxMean(source, width, height, radius) {
 
-  ctx.textAlign =
-    "center";
+  const stride = width + 1;
 
-  ctx.fillStyle =
-    "#e94f92";
+  const table =
+    new Float64Array(stride * (height + 1));
 
-  ctx.font =
-    "bold 60px Nunito";
+  for (let y = 0; y < height; y++) {
+
+    let rowSum = 0;
+
+    for (let x = 0; x < width; x++) {
+
+      rowSum += source[y * width + x];
+
+      table[(y + 1) * stride + x + 1] =
+        table[y * stride + x + 1] + rowSum;
+    }
+  }
+
+  const result =
+    new Float32Array(width * height);
+
+  for (let y = 0; y < height; y++) {
+
+    const y0 = Math.max(0, y - radius);
+    const y1 = Math.min(height, y + radius + 1);
+
+    for (let x = 0; x < width; x++) {
+
+      const x0 = Math.max(0, x - radius);
+      const x1 = Math.min(width, x + radius + 1);
+
+      const sum =
+        table[y1 * stride + x1] -
+        table[y0 * stride + x1] -
+        table[y1 * stride + x0] +
+        table[y0 * stride + x0];
+
+      result[y * width + x] =
+        sum / ((x1 - x0) * (y1 - y0));
+    }
+  }
+
+  return result;
+}
+
+
+// Subtle, skin-only retouch of one area of a captured shot:
+//  1. a soft, feathered mask of smooth skin-coloured areas (nothing
+//     outside it is touched),
+//  2. an edge-preserving guided filter, which flattens small bumps
+//     and blemishes but keeps eyes, brows, lips and hair edges,
+//  3. gentle evening of local redness (blemishes) and a slight
+//     brightening, all scaled by the mask.
+function applyBeauty(ctx, x, y, width, height, level) {
+
+  const image =
+    ctx.getImageData(x, y, width, height);
+
+  const data = image.data;
+  const count = width * height;
+
+  const luma = new Float32Array(count);
+  const lumaSquared = new Float32Array(count);
+
+  for (let i = 0, p = 0; i < count; i++, p += 4) {
+    const value = 0.299 * data[p] + 0.587 * data[p + 1] + 0.114 * data[p + 2];
+    luma[i] = value;
+    lumaSquared[i] = value * value;
+  }
+
+  // Skin is smooth; hair, brows, lashes and fabric are textured. Some
+  // hair shares skin's colour, so busy areas are left out of the mask.
+  const lumaMean = boxMean(luma, width, height, 3);
+  const lumaMeanSquared = boxMean(lumaSquared, width, height, 3);
+
+  const mask = new Float32Array(count);
+  let skinPixels = 0;
+
+  for (let i = 0, p = 0; i < count; i++, p += 4) {
+
+    const deviation = Math.sqrt(
+      Math.max(0, lumaMeanSquared[i] - lumaMean[i] * lumaMean[i])
+    );
+
+    const smoothness =
+      1 - Math.min(1, Math.max(0, (deviation - 9) / 14));
+
+    mask[i] =
+      skinScore(data[p], data[p + 1], data[p + 2]) * smoothness;
+
+    if (mask[i] > 0.5) {
+      skinPixels++;
+    }
+  }
+
+  // No visible skin (camera off, very dark frame...).
+  if (skinPixels < count * 0.005) {
+    return false;
+  }
+
+  const softMask =
+    boxMean(mask, width, height, 6);
+
+  const channel = new Float32Array(count);
+  const squared = new Float32Array(count);
+  const a = new Float32Array(count);
+  const b = new Float32Array(count);
+
+  const smoothed = [];
+  const localMean = [];
+
+  for (let c = 0; c < 3; c++) {
+
+    for (let i = 0; i < count; i++) {
+      const value = data[i * 4 + c];
+      channel[i] = value;
+      squared[i] = value * value;
+    }
+
+    const mean = boxMean(channel, width, height, level.radius);
+    const meanSquared = boxMean(squared, width, height, level.radius);
+
+    for (let i = 0; i < count; i++) {
+      const variance = meanSquared[i] - mean[i] * mean[i];
+      a[i] = variance / (variance + level.epsilon);
+      b[i] = mean[i] * (1 - a[i]);
+    }
+
+    const meanA = boxMean(a, width, height, level.radius);
+    const meanB = boxMean(b, width, height, level.radius);
+
+    const output = new Float32Array(count);
+
+    for (let i = 0; i < count; i++) {
+      output[i] = meanA[i] * channel[i] + meanB[i];
+    }
+
+    smoothed.push(output);
+
+    // Wider neighbourhood for judging "redder than the skin around it".
+    if (c < 2) {
+      localMean.push(
+        boxMean(channel, width, height, level.radius * 3)
+      );
+    }
+  }
+
+  for (let i = 0, p = 0; i < count; i++, p += 4) {
+
+    const m = softMask[i];
+
+    if (m < 0.02) {
+      continue;
+    }
+
+    const smoothing = m * level.smoothing;
+
+    let r = data[p] + (smoothed[0][i] - data[p]) * smoothing;
+    let g = data[p + 1] + (smoothed[1][i] - data[p + 1]) * smoothing;
+    let bl = data[p + 2] + (smoothed[2][i] - data[p + 2]) * smoothing;
+
+    // Capped so naturally red areas such as lips keep their colour.
+    const redness =
+      (data[p] - data[p + 1]) - (localMean[0][i] - localMean[1][i]);
+
+    if (redness > 0) {
+      r -= Math.min(redness, 20) * level.evenTone * m;
+    }
+
+    const lift = level.brighten * m;
+
+    r += (255 - r) * lift;
+    g += (255 - g) * lift;
+    bl += (255 - bl) * lift;
+
+    data[p] = r;
+    data[p + 1] = g;
+    data[p + 2] = bl;
+  }
+
+  ctx.putImageData(image, x, y);
+
+  return true;
+}
+
+
+// ---------- FRAMES ----------
+
+function roundRectPath(ctx, x, y, width, height, radius) {
+
+  ctx.beginPath();
+
+  if (ctx.roundRect) {
+    ctx.roundRect(x, y, width, height, radius);
+  } else {
+    ctx.rect(x, y, width, height);
+  }
+}
+
+
+function drawHeart(ctx, cx, cy, size, color, rotation = 0) {
+
+  const k = size / 2;
+
+  ctx.save();
+
+  ctx.translate(cx, cy);
+  ctx.rotate(rotation);
+
+  ctx.beginPath();
+  ctx.moveTo(0, k * 0.75);
+  ctx.bezierCurveTo(-k * 1.25, -k * 0.05, -k * 0.6, -k * 1.05, 0, -k * 0.42);
+  ctx.bezierCurveTo(k * 0.6, -k * 1.05, k * 1.25, -k * 0.05, 0, k * 0.75);
+  ctx.closePath();
+
+  ctx.fillStyle = color;
+  ctx.fill();
+
+  ctx.restore();
+}
+
+
+function drawSparkle(ctx, cx, cy, radius, color) {
+
+  ctx.beginPath();
+  ctx.moveTo(cx, cy - radius);
+  ctx.quadraticCurveTo(cx, cy, cx + radius, cy);
+  ctx.quadraticCurveTo(cx, cy, cx, cy + radius);
+  ctx.quadraticCurveTo(cx, cy, cx - radius, cy);
+  ctx.quadraticCurveTo(cx, cy, cx, cy - radius);
+
+  ctx.fillStyle = color;
+  ctx.fill();
+}
+
+
+function drawLeaf(ctx, x, y, length, angle, color) {
+
+  ctx.save();
+
+  ctx.translate(x, y);
+  ctx.rotate(angle);
+
+  ctx.beginPath();
+  ctx.moveTo(0, 0);
+  ctx.quadraticCurveTo(length * 0.5, -length * 0.36, length, 0);
+  ctx.quadraticCurveTo(length * 0.5, length * 0.36, 0, 0);
+
+  ctx.fillStyle = color;
+  ctx.fill();
+
+  ctx.beginPath();
+  ctx.moveTo(length * 0.08, 0);
+  ctx.lineTo(length * 0.82, 0);
+
+  ctx.strokeStyle = "rgba(255, 255, 255, 0.55)";
+  ctx.lineWidth = Math.max(1, length * 0.035);
+  ctx.stroke();
+
+  ctx.restore();
+}
+
+
+const ROSE_PINK = { outer: "#f9b8cc", inner: "#f48fb1", line: "#d9668f" };
+const ROSE_BLUSH = { outer: "#fde0e8", inner: "#f9c5d5", line: "#e891ad" };
+
+
+function drawRose(ctx, cx, cy, radius, colors, turn = 0) {
+
+  ctx.fillStyle = colors.outer;
+
+  for (let i = 0; i < 5; i++) {
+
+    const angle = turn + (i * Math.PI * 2) / 5;
+
+    ctx.beginPath();
+    ctx.ellipse(
+      cx + Math.cos(angle) * radius * 0.45,
+      cy + Math.sin(angle) * radius * 0.45,
+      radius * 0.55,
+      radius * 0.42,
+      angle,
+      0,
+      Math.PI * 2
+    );
+    ctx.fill();
+  }
+
+  ctx.beginPath();
+  ctx.arc(cx, cy, radius * 0.56, 0, Math.PI * 2);
+  ctx.fillStyle = colors.inner;
+  ctx.fill();
+
+  // Swirl of the inner petals.
+  ctx.beginPath();
+
+  const turns = Math.PI * 3.2;
+
+  for (let t = 0; t <= turns; t += 0.15) {
+
+    const r = radius * (0.05 + (t / turns) * 0.46);
+
+    const px = cx + Math.cos(t + turn) * r;
+    const py = cy + Math.sin(t + turn) * r;
+
+    if (t === 0) {
+      ctx.moveTo(px, py);
+    } else {
+      ctx.lineTo(px, py);
+    }
+  }
+
+  ctx.strokeStyle = colors.line;
+  ctx.lineWidth = Math.max(1, radius * 0.08);
+  ctx.lineCap = "round";
+  ctx.stroke();
+}
+
+
+function drawBow(ctx, cx, cy, size, color, knotColor) {
+
+  ctx.fillStyle = color;
+
+  for (const dir of [-1, 1]) {
+
+    // Loop.
+    ctx.beginPath();
+    ctx.ellipse(
+      cx + dir * size * 0.55,
+      cy - size * 0.12,
+      size * 0.58,
+      size * 0.36,
+      -dir * 0.35,
+      0,
+      Math.PI * 2
+    );
+    ctx.fill();
+
+    // Tail.
+    ctx.beginPath();
+    ctx.moveTo(cx - dir * size * 0.04, cy);
+    ctx.lineTo(cx + dir * size * 0.5, cy + size * 0.95);
+    ctx.lineTo(cx + dir * size * 0.28, cy + size * 0.86);
+    ctx.lineTo(cx + dir * size * 0.16, cy + size * 1.0);
+    ctx.closePath();
+    ctx.fill();
+  }
+
+  ctx.beginPath();
+  ctx.arc(cx, cy, size * 0.2, 0, Math.PI * 2);
+  ctx.fillStyle = knotColor;
+  ctx.fill();
+}
+
+
+// The strip's paper. `scale` lets the small previews reuse it.
+function drawStripBackground(ctx, style, width, height, scale = 1) {
+
+  if (style === "letter") {
+
+    ctx.fillStyle = "#fffaf7";
+    ctx.fillRect(0, 0, width, height);
+
+    // Faint writing-paper lines.
+    ctx.strokeStyle = "#f8e4ec";
+    ctx.lineWidth = Math.max(1, 2 * scale);
+
+    for (let y = 40 * scale; y < height; y += 40 * scale) {
+      ctx.beginPath();
+      ctx.moveTo(0, y);
+      ctx.lineTo(width, y);
+      ctx.stroke();
+    }
+
+    return;
+  }
+
+  const background =
+    ctx.createLinearGradient(0, 0, width, height);
+
+  if (style === "roses") {
+    background.addColorStop(0, "#fffaf5");
+    background.addColorStop(1, "#fde2ea");
+  } else {
+    background.addColorStop(0, "#fff7fb");
+    background.addColorStop(1, "#ffd6e8");
+  }
+
+  ctx.fillStyle = background;
+  ctx.fillRect(0, 0, width, height);
+}
+
+
+// Border and corner decorations for one shot. Everything stays on
+// the edges and corners (mostly over the strip's margin) so faces
+// are never covered. `s` scales the decorations.
+function drawFrameDecor(ctx, style, x, y, w, h, s = 1) {
+
+  ctx.save();
+
+  ctx.shadowColor = "rgba(189, 71, 123, 0.25)";
+  ctx.shadowBlur = 8 * s;
+  ctx.shadowOffsetY = 2 * s;
+
+  if (style === "roses") {
+
+    roundRectPath(ctx, x, y, w, h, 26 * s);
+    ctx.strokeStyle = "#fde4ec";
+    ctx.lineWidth = 10 * s;
+    ctx.stroke();
+
+    roundRectPath(ctx, x - 9 * s, y - 9 * s, w + 18 * s, h + 18 * s, 32 * s);
+    ctx.strokeStyle = "#f7b6cb";
+    ctx.lineWidth = 2.5 * s;
+    ctx.stroke();
+
+    // Top-left bouquet.
+    drawLeaf(ctx, x + 6 * s, y + 20 * s, 78 * s, Math.PI / 2 + 0.25, "#a8d5a2");
+    drawLeaf(ctx, x + 22 * s, y + 4 * s, 78 * s, -0.2, "#8fc79a");
+    drawRose(ctx, x + 6 * s, y + 6 * s, 42 * s, ROSE_PINK, 0.3);
+    drawRose(ctx, x + 66 * s, y - 10 * s, 24 * s, ROSE_BLUSH, 1.2);
+
+    // Bottom-right bouquet.
+    drawLeaf(ctx, x + w - 6 * s, y + h - 20 * s, 78 * s, -Math.PI / 2 + 0.25, "#a8d5a2");
+    drawLeaf(ctx, x + w - 22 * s, y + h - 4 * s, 78 * s, Math.PI - 0.2, "#8fc79a");
+    drawRose(ctx, x + w - 6 * s, y + h - 6 * s, 42 * s, ROSE_PINK, 2.1);
+    drawRose(ctx, x + w - 66 * s, y + h + 10 * s, 24 * s, ROSE_BLUSH, 0.6);
+
+    // Tiny hearts on the quiet corners.
+    drawHeart(ctx, x + w - 8 * s, y + 4 * s, 26 * s, "#f6a5c0", 0.25);
+    drawHeart(ctx, x + 8 * s, y + h - 4 * s, 22 * s, "#f9c5d5", -0.25);
+
+  } else if (style === "letter") {
+
+    roundRectPath(ctx, x, y, w, h, 18 * s);
+    ctx.strokeStyle = "#f7a8c8";
+    ctx.lineWidth = 6 * s;
+    ctx.stroke();
+
+    ctx.shadowColor = "transparent";
+
+    // Little stitched line just inside the border.
+    roundRectPath(ctx, x + 14 * s, y + 14 * s, w - 28 * s, h - 28 * s, 10 * s);
+    ctx.setLineDash([14 * s, 10 * s]);
+    ctx.strokeStyle = "rgba(255, 255, 255, 0.75)";
+    ctx.lineWidth = 2.5 * s;
+    ctx.stroke();
+    ctx.setLineDash([]);
+
+    ctx.shadowColor = "rgba(189, 71, 123, 0.25)";
+
+    // Bow on the top edge, between the two people.
+    drawBow(ctx, x + w / 2, y + 2 * s, 46 * s, "#f48fb1", "#e26a9a");
+
+    drawHeart(ctx, x + 6 * s, y + h - 4 * s, 42 * s, "#f7a8c8", -0.3);
+    drawHeart(ctx, x + w - 6 * s, y + h - 4 * s, 42 * s, "#f7a8c8", 0.3);
+
+  } else {
+
+    roundRectPath(ctx, x, y, w, h, 26 * s);
+    ctx.strokeStyle = "#ffffff";
+    ctx.lineWidth = 10 * s;
+    ctx.stroke();
+
+    roundRectPath(ctx, x - 10 * s, y - 10 * s, w + 20 * s, h + 20 * s, 34 * s);
+    ctx.strokeStyle = "#ffb3d1";
+    ctx.lineWidth = 3 * s;
+    ctx.stroke();
+
+    // Top-left cluster.
+    drawHeart(ctx, x + 8 * s, y + 12 * s, 66 * s, "#ff8fbf", -0.3);
+    drawHeart(ctx, x + 70 * s, y - 8 * s, 34 * s, "#ffc2db", 0.25);
+    drawSparkle(ctx, x + 112 * s, y + 18 * s, 15 * s, "#fff0f7");
+    drawSparkle(ctx, x + 20 * s, y + 84 * s, 11 * s, "#ffd6e7");
+
+    // Bottom-right cluster.
+    drawHeart(ctx, x + w - 10 * s, y + h - 12 * s, 60 * s, "#ff8fbf", 0.3);
+    drawHeart(ctx, x + w - 70 * s, y + h + 8 * s, 30 * s, "#ffc2db", -0.2);
+    drawSparkle(ctx, x + w - 112 * s, y + h - 16 * s, 14 * s, "#fff0f7");
+    drawSparkle(ctx, x + w - 18 * s, y + h - 84 * s, 10 * s, "#ffd6e7");
+
+    // A few tiny sparkles on the other corners.
+    drawSparkle(ctx, x + w - 14 * s, y + 14 * s, 13 * s, "#ffe3ef");
+    drawSparkle(ctx, x + w - 46 * s, y - 6 * s, 8 * s, "#ffd6e7");
+    drawHeart(ctx, x + 12 * s, y + h - 10 * s, 24 * s, "#ffc2db", -0.2);
+  }
+
+  ctx.restore();
+}
+
+
+function drawFramedShot(ctx, shot, x, y, style) {
+
+  ctx.save();
+
+  roundRectPath(ctx, x, y, SHOT_WIDTH, SHOT_HEIGHT, style === "letter" ? 18 : 26);
+  ctx.clip();
+
+  ctx.drawImage(shot, x, y);
+
+  // Soft pink wash.
+  ctx.fillStyle = "rgba(255, 111, 174, 0.06)";
+  ctx.fillRect(x, y, SHOT_WIDTH, SHOT_HEIGHT);
+
+  ctx.restore();
+
+  drawFrameDecor(ctx, style, x, y, SHOT_WIDTH, SHOT_HEIGHT);
+}
+
+
+function drawStripFooter(ctx, style) {
+
+  const footerTop =
+    STRIP_HEIGHT - STRIP_FOOTER;
+
+  const titleY = footerTop + 128;
+  const dateY = footerTop + 188;
+
+  ctx.textAlign = "center";
+
+  ctx.fillStyle = "#e94f92";
+  ctx.font = "76px Pacifico, cursive";
 
   ctx.fillText(
     "our little world",
-    width / 2,
-    PHOTO_PADDING + PHOTO_PANEL_HEIGHT + 78
+    STRIP_WIDTH / 2,
+    titleY
   );
 
-  ctx.fillStyle =
-    "#b07991";
+  const titleWidth =
+    ctx.measureText("our little world").width;
 
-  ctx.font =
-    "bold 26px Nunito";
+  ctx.fillStyle = "#b07991";
+  ctx.font = "bold 30px Nunito";
 
   ctx.fillText(
     new Date().toLocaleDateString(undefined, {
@@ -1681,31 +2561,128 @@ function drawCompositePhoto() {
       month: "long",
       day: "numeric"
     }),
-    width / 2,
-    PHOTO_PADDING + PHOTO_PANEL_HEIGHT + 118
+    STRIP_WIDTH / 2,
+    dateY
   );
 
-  console.log("[PHOTO] Composite created", `${width}x${height}`);
+  // A small accent on each side of the title.
+  const sideOffset = titleWidth / 2 + 52;
+
+  for (const dir of [-1, 1]) {
+
+    const cx = STRIP_WIDTH / 2 + dir * sideOffset;
+    const cy = titleY - 24;
+
+    if (style === "roses") {
+      drawRose(ctx, cx, cy, 20, ROSE_PINK, dir);
+    } else if (style === "letter") {
+      drawBow(ctx, cx, cy - 6, 22, "#f7a8c8", "#e26a9a");
+    } else {
+      drawHeart(ctx, cx, cy, 34, "#ff8fbf", dir * 0.25);
+    }
+  }
 }
 
 
-// Initiator only: export the composite, upload it, record the
-// memory, then tell the other person it's ready.
-async function saveCapturedPhoto(memoryId) {
+// ---------- STRIP ----------
 
-  const roomCode = currentRoom;
+// Initiator only: retouches the 3 shots, frames them and lays out
+// the final strip in the existing canvas.
+async function createPhotoStrip(capture) {
 
-  const blob =
-    await new Promise(resolve =>
-      canvas.toBlob(resolve, "image/jpeg", 0.92)
+  if (capture.shots.length !== SHOT_COUNT) {
+    throw new Error(
+      `Expected ${SHOT_COUNT} shots, got ${capture.shots.length}`
     );
+  }
+
+  const { frame, beauty } = capture.settings;
+
+  const level = BEAUTY_LEVELS[beauty];
+
+  if (level) {
+
+    for (const shot of capture.shots) {
+
+      const shotCtx =
+        shot.getContext("2d", { willReadFrequently: true });
+
+      applyBeauty(shotCtx, 0, 0, PERSON_WIDTH, SHOT_HEIGHT, level);
+      applyBeauty(shotCtx, PERSON_WIDTH + SHOT_DIVIDER, 0, PERSON_WIDTH, SHOT_HEIGHT, level);
+
+      // Keep the page responsive between shots.
+      await waitForPaint();
+    }
+
+    console.log("[PHOTO] Beauty effect applied", beauty);
+
+  } else {
+
+    console.log("[PHOTO] Beauty effect off");
+
+  }
+
+  try {
+    await document.fonts.load("76px Pacifico");
+  } catch (_) {}
+
+  canvas.width = STRIP_WIDTH;
+  canvas.height = STRIP_HEIGHT;
+
+  const ctx =
+    canvas.getContext("2d");
+
+  drawStripBackground(ctx, frame, STRIP_WIDTH, STRIP_HEIGHT);
+
+  capture.shots.forEach((shot, index) => {
+
+    drawFramedShot(
+      ctx,
+      shot,
+      STRIP_PADDING,
+      STRIP_PADDING + index * (SHOT_HEIGHT + SHOT_GAP),
+      frame
+    );
+
+  });
+
+  console.log("[PHOTO] Frame applied", frame);
+
+  drawStripFooter(ctx, frame);
+
+  console.log("[PHOTO] Final strip created", `${STRIP_WIDTH}x${STRIP_HEIGHT}`);
+}
+
+
+function exportCanvas(quality) {
+
+  return new Promise(resolve =>
+    canvas.toBlob(resolve, "image/jpeg", quality)
+  );
+}
+
+
+// Initiator only: export the strip, upload it, record the memory,
+// then tell the other person it's ready.
+async function saveCapturedPhoto(capture) {
+
+  const roomCode = capture.roomCode;
+  const memoryId = capture.captureId;
+
+  let blob =
+    await exportCanvas(0.92);
+
+  // Stay under the bucket's size limit.
+  if (blob && blob.size > MAX_UPLOAD_BYTES) {
+    blob = await exportCanvas(0.82);
+  }
 
   if (!blob) {
 
     console.error("[PHOTO] Could not export JPEG");
 
     setPhotoStatus(
-      "Could not create the photo. Please try again."
+      "Could not create the photo strip. Please try again."
     );
 
     await sendPhotoEvent({ type: "photo-failed" });
@@ -1718,7 +2695,10 @@ async function saveCapturedPhoto(memoryId) {
     URL.createObjectURL(blob);
 
   latestPhoto = url;
+  latestPhotoDate = new Date();
   downloadBtn.disabled = false;
+
+  showStrip(url);
 
   setPhotoStatus(
     "Saving your memory..."
@@ -1934,7 +2914,10 @@ async function receiveRemoteMemory(memoryId) {
     if (addMemory({ ...memory, url }, { reveal: true })) {
 
       latestPhoto = url;
+      latestPhotoDate = new Date(memory.created_at);
       downloadBtn.disabled = false;
+
+      showStrip(url);
 
       setPhotoStatus(
         "A new little memory ♡"
@@ -1942,9 +2925,13 @@ async function receiveRemoteMemory(memoryId) {
 
     }
 
+    finishDeveloping();
+
   } catch (error) {
 
     console.error("[PHOTO] Could not load remote memory:", error);
+
+    finishDeveloping();
 
     setPhotoStatus(
       "A new memory was saved, but it couldn't load here. Rejoin the booth to see it ♡"
@@ -2024,6 +3011,16 @@ function renderGallery() {
 }
 
 
+// our-little-world-YYYY-MM-DD.jpg (local date).
+function photoFileName(date) {
+
+  const pad = number =>
+    String(number).padStart(2, "0");
+
+  return `our-little-world-${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}.jpg`;
+}
+
+
 function downloadPhoto() {
 
   if (!latestPhoto) {
@@ -2040,7 +3037,7 @@ function downloadPhoto() {
 
 
   link.download =
-    `koko-baobao-${Date.now()}.jpg`;
+    photoFileName(latestPhotoDate || new Date());
 
 
   link.click();
@@ -2105,6 +3102,8 @@ async function leaveRoom({ keepRole = false } = {}) {
 
   memories = [];
   renderGallery();
+
+  hide(stripReveal);
 
   if (!keepRole) {
     myRole = null;
@@ -2177,6 +3176,16 @@ downloadBtn.addEventListener(
   downloadPhoto
 );
 
+frameSelector.addEventListener(
+  "click",
+  selectFrame
+);
+
+beautySelector.addEventListener(
+  "click",
+  selectBeauty
+);
+
 
 // Allow Enter key in room input.
 roomCodeInput.addEventListener(
@@ -2218,6 +3227,10 @@ window.addEventListener(
 
 
 // ---------- START ----------
+
+loadPhotoSettings();
+updatePhotoOptionsUI();
+renderFramePreviews();
 
 renderGallery();
 checkSession();

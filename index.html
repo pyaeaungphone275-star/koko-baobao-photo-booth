@@ -81,7 +81,38 @@
         </div>
 
         <div id="countdownOverlay" class="countdown-overlay hidden" aria-live="assertive">
+          <p id="shotIndicator" class="shot-indicator"></p>
           <span id="countdownNumber"></span>
+          <p id="developingText" class="developing-text hidden">developing our little memory ♡</p>
+        </div>
+      </div>
+
+      <div class="booth-options">
+        <div class="option-group">
+          <span class="option-label">Frame</span>
+          <div id="frameSelector" class="frame-selector" role="radiogroup" aria-label="Photo frame">
+            <button type="button" class="frame-chip" data-frame="hearts" role="radio">
+              <canvas class="frame-preview" width="120" height="90"></canvas>
+              <span>Pink Hearts</span>
+            </button>
+            <button type="button" class="frame-chip" data-frame="roses" role="radio">
+              <canvas class="frame-preview" width="120" height="90"></canvas>
+              <span>Rose Garden</span>
+            </button>
+            <button type="button" class="frame-chip" data-frame="letter" role="radio">
+              <canvas class="frame-preview" width="120" height="90"></canvas>
+              <span>Love Letter</span>
+            </button>
+          </div>
+        </div>
+
+        <div class="option-group">
+          <span class="option-label">Beauty</span>
+          <div id="beautySelector" class="segmented" role="radiogroup" aria-label="Beauty effect">
+            <button type="button" data-beauty="natural" role="radio">Natural</button>
+            <button type="button" data-beauty="soft" role="radio">Soft</button>
+            <button type="button" data-beauty="off" role="radio">Off</button>
+          </div>
         </div>
       </div>
 
@@ -92,6 +123,11 @@
       </div>
 
       <p id="photoStatus" class="status">Turn on your camera to start.</p>
+
+      <div id="stripReveal" class="strip-reveal hidden">
+        <img id="stripImage" alt="our little world photo strip">
+      </div>
+
       <canvas id="canvas"></canvas>
     </section>
 
