@@ -118,6 +118,10 @@ let turnServersFetchedAt = 0;
 let remoteUserId = null;
 let makingOffer = false;
 
+// An offer was asked for while another offer/answer exchange was
+// still in progress; make it once that exchange completes.
+let offerPending = false;
+
 let pendingCandidates = [];
 
 let latestPhoto = null;
@@ -878,9 +882,22 @@ async function makeOffer() {
     return;
   }
 
-  if (makingOffer) {
+  if (
+    makingOffer ||
+    peerConnection.signalingState !== "stable"
+  ) {
+
+    console.log(
+      "[WEBRTC] Offer skipped: negotiation already in progress",
+      `(${peerConnection.signalingState})`
+    );
+
+    offerPending = true;
+
     return;
   }
+
+  offerPending = false;
 
   makingOffer = true;
 
@@ -962,11 +979,36 @@ async function handleSignal(signal) {
 
     console.log("[WEBRTC] Received answer");
 
-    await peerConnection.setRemoteDescription(
-      new RTCSessionDescription(signal.sdp)
-    );
+    // An answer is only valid while our offer is outstanding. A late
+    // duplicate (from an earlier offer) must not throw.
+    if (peerConnection.signalingState !== "have-local-offer") {
+
+      console.warn(
+        "[WEBRTC] Ignoring stale answer: connection already stable",
+        `(${peerConnection.signalingState})`
+      );
+
+    } else {
+
+      try {
+
+        await peerConnection.setRemoteDescription(
+          new RTCSessionDescription(signal.sdp)
+        );
+
+      } catch (error) {
+
+        console.error("[WEBRTC] Could not apply answer:", error);
+
+      }
+    }
 
     await flushCandidates();
+
+    // Tracks changed while that exchange was in progress.
+    if (offerPending && peerConnection.signalingState === "stable") {
+      await makeOffer();
+    }
 
     return;
   }
@@ -1084,6 +1126,8 @@ function closePeerConnection() {
   peerConnection = null;
 
   pendingCandidates = [];
+
+  offerPending = false;
 }
 
 
@@ -1155,11 +1199,9 @@ async function startCamera() {
       });
     }
 
-    // Starts the beauty pipeline when Beauty is on, and shows the
-    // same video in the preview that will be sent.
-    liveBeautyFailed = false;
-
-    await updateLiveBeauty();
+    // Raw camera first, so WebRTC negotiation never waits for the
+    // Beauty pipeline; its track replaces the raw video afterwards.
+    await showLocalPreview();
 
 
     captureBtn.disabled =
@@ -1216,6 +1258,8 @@ async function startCamera() {
       }
 
 
+      console.log("[WEBRTC] Raw camera tracks attached");
+
       // Only Koko creates offers. If BaoBao just added a new
       // track after the connection was already established,
       // ask Koko to renegotiate instead of offering herself.
@@ -1225,6 +1269,13 @@ async function startCamera() {
         await sendSignal({ type: "renegotiate" });
       }
     }
+
+
+    // Now start Beauty (when on). Once its track is ready it replaces
+    // only the video sender's track - no renegotiation.
+    liveBeautyFailed = false;
+
+    await updateLiveBeauty();
 
   } catch (error) {
 
@@ -1513,6 +1564,10 @@ async function replaceOutgoingVideo() {
   }
 
   try {
+
+    if (liveBeauty && track === liveBeauty.track) {
+      console.log("[WEBRTC] Beauty track replacing raw video track");
+    }
 
     await sender.replaceTrack(track);
 
